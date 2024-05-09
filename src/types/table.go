@@ -144,7 +144,7 @@ func (t *Table) Iterator() <-chan Row {
 	return ch
 }
 
-func (t Table) Head(n int) *Table {
+func (t Table) Head(n int) Table {
 	if n >= len(t.rows) {
 		return t
 	}
@@ -159,7 +159,7 @@ func (t Table) Head(n int) *Table {
 		newTable.AddRow(row)
 	}
 
-	return newTable
+	return *newTable
 }
 
 /* HELPER FUNCTIONS */
