@@ -14,8 +14,9 @@ type Table struct {
 
 func NewTable(columns []string) *Table {
 	columnMap := make(map[string]int, len(columns))
-	for i, col := range columns {
-		columnMap[col] = i
+
+	for i, columnName := range columns {
+		columnMap[columnName] = i
 	}
 
 	return &Table{
@@ -26,11 +27,14 @@ func NewTable(columns []string) *Table {
 }
 
 func (t *Table) AddColumn(newColumnName string, defaultValue interface{}) error {
-	for _, val := range t.columns {
-		if val == newColumnName {
-			return fmt.Errorf("column %s already exists", newColumnName)
-		}
+	if newColumnName == "" {
+		return fmt.Errorf("column name cannot be empty")
 	}
+
+	if _, ok := t.columnMap[newColumnName]; ok {
+		return fmt.Errorf("column %s already exists", newColumnName)
+	}
+
 	t.columns = append(t.columns, newColumnName)
 	t.columnMap[newColumnName] = len(t.columns) - 1
 
@@ -42,7 +46,7 @@ func (t *Table) AddColumn(newColumnName string, defaultValue interface{}) error 
 	return nil
 }
 
-func (t *Table) GetColumn(column string) ([]interface{}, bool) {
+func (t Table) GetColumnValues(column string) ([]interface{}, bool) {
 	index, ok := t.columnMap[column]
 	if !ok {
 		return nil, false
@@ -68,10 +72,13 @@ func (t *Table) NewRow() int {
 	return index - 1
 }
 
-func (t *Table) AddRow(row map[string]interface{}) int {
+func (t *Table) AddRow(row map[string]interface{}) (int, error) {
 	newRowIndex := t.NewRow()
-	t.InsertRowAtIndex(newRowIndex, row)
-	return newRowIndex
+	err := t.InsertRowAtIndex(newRowIndex, row)
+	if err != nil {
+		return -1, err
+	}
+	return newRowIndex, nil
 }
 
 func (t *Table) InsertRowAtIndex(index int, row map[string]interface{}) error {
@@ -80,25 +87,28 @@ func (t *Table) InsertRowAtIndex(index int, row map[string]interface{}) error {
 	}
 
 	for col, val := range row {
-		t.SetValueByIndex(index, col, val)
+		err := t.SetValueByIndex(index, col, val)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (t *Table) GetRow(index int) (map[string]interface{}, bool) {
+func (t Table) GetRow(index int) (map[string]interface{}, bool) {
 	if index < 0 || index >= len(t.rows) {
 		return nil, false
 	}
 
-	return t.convertRow(t.rows[index]), true
+	return t.convertRow(index), true
 }
 
 func (t *Table) SetRow(index int, row map[string]interface{}) error {
 	return t.InsertRowAtIndex(index, row)
 }
 
-func (t *Table) GetValueByIndex(index int, column string) (interface{}, bool) {
+func (t Table) GetValueByIndex(index int, column string) (interface{}, bool) {
 	if index < 0 || index >= len(t.rows) {
 		return nil, false
 	}
@@ -116,7 +126,7 @@ func (t *Table) SetValueByIndex(index int, column string, value interface{}) err
 	}
 
 	if index < 0 || index >= len(t.rows) {
-		return fmt.Errorf("Row by index %d does not exist", index)
+		return fmt.Errorf("row by index %d does not exist", index)
 	}
 
 	t.rows[index][t.columnMap[column]] = value
@@ -134,7 +144,7 @@ func (t *Table) Iterator() <-chan Row {
 	return ch
 }
 
-func (t *Table) Head(n int) *Table {
+func (t Table) Head(n int) *Table {
 	if n >= len(t.rows) {
 		return t
 	}
@@ -153,31 +163,32 @@ func (t *Table) Head(n int) *Table {
 }
 
 /* HELPER FUNCTIONS */
-func (t Table) convertRow(row Row) map[string]interface{} {
+func (t Table) convertRow(index int) map[string]interface{} {
 	result := make(map[string]interface{})
-	for i, value := range row {
-		result[t.columns[i]] = value
+	for _, columnName := range t.columns {
+		value, _ := t.GetValueByIndex(index, columnName)
+		result[columnName] = value
 	}
 	return result
 }
 
-func (t *Table) NumRows() int {
+func (t Table) NumRows() int {
 	return len(t.rows)
 }
 
-func (t *Table) NumCols() int {
+func (t Table) NumCols() int {
 	return len(t.columns)
 }
 
-func (t *Table) Cols() []string {
+func (t Table) Cols() []string {
 	return t.columns
 }
 
-func (t *Table) Rows() []Row {
+func (t Table) Rows() []Row {
 	return t.rows
 }
 
-func (t *Table) Get(index int, column string) (interface{}, bool) {
+func (t Table) Get(index int, column string) (interface{}, bool) {
 	return t.GetValueByIndex(index, column)
 }
 
