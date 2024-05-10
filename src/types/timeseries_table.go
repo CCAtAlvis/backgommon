@@ -130,20 +130,37 @@ func (t *TimeseriesTable[T]) Iterator() <-chan map[string]T {
 	return ch
 }
 
-func (t TimeseriesTable[T]) Rows() [][]T {
-	rows := t.table.Rows()
-	typedRows := make([][]T, len(rows))
-	for i, row := range rows {
-		typedRow := make([]T, len(row))
-		for j, value := range row {
-			typedValue, _ := value.(T) // ignoring type assertion error as setting of values is type checked
-			typedRow[j] = typedValue
-		}
-		typedRows[i] = typedRow
+func (t *TimeseriesTable[T]) Rows() []TimeseriesRow[T] {
+	if t.isDirty {
+		sort.Slice(t.timestampArr, func(i, j int) bool {
+			return t.timestampArr[i].Before(t.timestampArr[j])
+		})
+		t.isDirty = false
 	}
-	return typedRows
+
+	rows := make([]TimeseriesRow[T], len(t.timestampArr))
+	for i, timestamp := range t.timestampArr {
+		rows[i] = TimeseriesRow[T]{
+			Timestamp: timestamp,
+			table:     t,
+		}
+	}
+	return rows
 }
 
 func (t TimeseriesTable[T]) Cols() []string {
 	return t.table.Cols()
+}
+
+type TimeseriesRow[T any] struct {
+	Timestamp time.Time
+	table     *TimeseriesTable[T]
+}
+
+func (r TimeseriesRow[T]) Get() (map[string]T, bool) {
+	return r.table.GetRow(r.Timestamp)
+}
+
+func (r TimeseriesRow[T]) GetValue(column string) (T, bool) {
+	return r.table.GetValue(r.Timestamp, column)
 }
