@@ -95,8 +95,12 @@ func (t TimeseriesTable[T]) GetValue(timestamp time.Time, column string) (T, boo
 		var zero T
 		return zero, false
 	} else {
-		value, _ := t.table.Get(index, column) // ignoring ok as GetIndexFor is already checked
-		assertedValue, _ := value.(T)          // ignoring type assertion error as setting of values is type checked
+		value, ok := t.table.Get(index, column)
+		if !ok {
+			var zero T
+			return zero, false
+		}
+		assertedValue, _ := value.(T) // ignoring type assertion error as setting of values is type checked
 		return assertedValue, true
 	}
 }
