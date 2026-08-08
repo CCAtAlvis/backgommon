@@ -1,3 +1,19 @@
+// Package portfolio manages position tracking, cash accounting, and trade cost
+// simulation for backtesting strategies.
+//
+// The package is built around three extensible contracts:
+//   - [CostCalculator] — brokerage fees, transaction taxes, and capital gains taxes
+//   - [CashFlowCalculator] — cash movement on entry, exit, and equity marks
+//   - [PeriodicEventsModel] — scheduled cash flows (SIP, interest, leverage costs, management fees)
+//
+// Each contract has a Standard implementation driven by [Settings] fields and a
+// Func wrapper (e.g. [FuncCostCalculator]) for partial overrides. Inject custom
+// implementations at construction time using the Option pattern:
+//
+//	p := portfolio.New(settings,
+//	    portfolio.WithCostCalculator(myCalc),
+//	    portfolio.WithPeriodicEventsModel(myModel),
+//	)
 package portfolio
 
 import (
@@ -5,16 +21,42 @@ import (
 	"time"
 )
 
-// Portfolio manages positions and cash
+// Portfolio is the central accounting engine for a backtest. It tracks open and
+// closed positions, maintains the cash balance, accumulates trade costs, and
+// computes mark-to-market equity.
+//
+// Portfolio is NOT safe for concurrent use. The runner drives it sequentially,
+// one bar at a time.
 type Portfolio struct {
 	cash            float64
 	openPositions   map[string]*Position
 	closedPositions []*Position
 	orderHistory    []Order
 	settings        *Settings
+
+	costCalculator     CostCalculator
+	cashFlowCalculator CashFlowCalculator
+	periodicEvents     PeriodicEventsModel
+
+	lastSIPTime           time.Time
+	lastIdleInterestTime  time.Time
+	lastLeverageCostTime  time.Time
+	lastManagementFeeTime time.Time
+
+	// Accumulated costs for reporting
+	totalBrokerage         float64
+	brokerageBuySide       float64
+	brokerageSellSide      float64
+	totalTransactionTax    float64
+	transactionTaxBuySide  float64
+	transactionTaxSellSide float64
+	totalCapitalGainsTax   float64
+	totalInvestment        float64
 }
 
-// Settings contains portfolio-specific settings
+// Settings holds all portfolio configuration: capital, leverage, periodic
+// contributions, brokerage fees, taxation rules, and profit management.
+// Pass a *Settings to [New] to initialize the portfolio's accounting rules.
 type Settings struct {
 	// --- Core Portfolio Setup ---
 
@@ -35,6 +77,12 @@ type Settings struct {
 	// available for trading. Expressed as a decimal.
 	// e.g., 0.02 (for a 2% cash reserve)
 	CashReserveRate float64
+
+	// AllowNegativeCashFromFees when true allows fees (brokerage + taxes) to push
+	// the cash balance below zero, but the order's margin (notional value) itself
+	// must still fit within available cash. Once cash is negative, no new entries
+	// are permitted. Default is false (full amount including fees must fit in cash).
+	AllowNegativeCashFromFees bool
 
 	// --- Periodic Contributions/Withdrawals ---
 
@@ -127,19 +175,43 @@ type Settings struct {
 	Execution ExecutionSettings
 }
 
-// New creates a new portfolio with given settings
-func New(settings *Settings) *Portfolio {
-	return &Portfolio{
+// New creates a Portfolio initialized with the given settings and optional
+// functional options. If no options are provided, the portfolio uses
+// [StandardCostCalculator], [StandardCashFlowCalculator], and
+// [StandardPeriodicEventsModel] driven by the Settings fields.
+func New(settings *Settings, opts ...Option) *Portfolio {
+	p := &Portfolio{
 		cash:            settings.InitialCapital,
 		openPositions:   make(map[string]*Position),
 		closedPositions: make([]*Position, 0),
 		orderHistory:    make([]Order, 0),
 		settings:        settings,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
-// ProcessOrder handles order execution
+// Settings returns a read-only view of portfolio configuration.
+func (p *Portfolio) Settings() Settings {
+	return p.settingsSnapshot()
+}
+
+// ProcessOrder validates and executes an order against the portfolio.
+//
+// For Entry orders: creates a new position or adds to an existing one for the
+// same instrument, deducts margin + fees from cash.
+//
+// For Exit orders: reduces position quantity, credits margin release + realized
+// PnL - fees to cash. A full exit (quantity == position size) closes the position
+// and moves it to closed history.
+//
+// Returns an error if: shorts are disabled, cash is insufficient for entry,
+// no matching position exists for exit, or exit quantity exceeds position size.
 func (p *Portfolio) ProcessOrder(ord Order) error {
+	ord = p.normalizeOrder(ord)
+
 	if err := p.validateOrder(ord); err != nil {
 		return err
 	}
@@ -154,7 +226,20 @@ func (p *Portfolio) ProcessOrder(ord Order) error {
 	}
 }
 
-// UpdatePositions updates all positions with current prices
+// normalizeOrder resolves conventions before validation (Quantity 0 exit = full close).
+func (p *Portfolio) normalizeOrder(ord Order) Order {
+	if ord.Type == Exit && ord.Quantity == 0 {
+		if pos, ok := p.openPositions[ord.Instrument]; ok {
+			ord.Quantity = pos.Quantity
+		}
+	}
+	ord.Leverage = effectiveLeverage(ord, p.settings)
+	return ord
+}
+
+// UpdatePositions refreshes mark-to-market metrics (unrealized PnL, max drawdown,
+// highest/lowest price) for all open positions using the given instrument→price map.
+// Instruments not present in prices are left unchanged.
 func (p *Portfolio) UpdatePositions(prices map[string]float64) {
 	for instrument, pos := range p.openPositions {
 		if price, ok := prices[instrument]; ok {
@@ -163,24 +248,46 @@ func (p *Portfolio) UpdatePositions(prices map[string]float64) {
 	}
 }
 
-// Value returns total portfolio value
+// Value returns total portfolio equity: cash balance plus the mark-to-market
+// contribution of every open position (margin deployed + unrealized PnL).
 func (p *Portfolio) Value() float64 {
-	value := p.cash
-	for _, pos := range p.openPositions {
-		value += pos.UnrealizedPnL // This needs to be more sophisticated with short positions
-	}
-	// TODO: Consider margin accounts, short sale proceeds/liabilities for a more accurate value.
-	return value
+	return p.markToMarketEquity()
 }
 
-// Cash returns available cash
+// InitialCapital returns the configured starting cash.
+func (p *Portfolio) InitialCapital() float64 {
+	return p.settings.InitialCapital
+}
+
+// Stats returns aggregate portfolio statistics. This is the preferred accessor;
+// it delegates to [Portfolio.GetPortfolioStats].
+func (p *Portfolio) Stats() PortfolioStats {
+	return p.GetPortfolioStats()
+}
+
+// ClosedPositions returns a defensive copy of the closed position slice.
+// Callers may safely mutate the returned slice without affecting the portfolio.
+func (p *Portfolio) ClosedPositions() []*Position {
+	out := make([]*Position, len(p.closedPositions))
+	copy(out, p.closedPositions)
+	return out
+}
+
+// Cash returns the current uninvested cash balance.
 func (p *Portfolio) Cash() float64 {
 	return p.cash
 }
 
-// Positions returns all open positions
+// Positions returns a shallow copy of the open positions map keyed by instrument.
+// The returned map is safe to iterate and delete from without affecting the
+// portfolio. The Position pointers still refer to the same structs, so field
+// reads reflect live state but callers should not mutate Position fields directly.
 func (p *Portfolio) Positions() map[string]*Position {
-	return p.openPositions
+	cp := make(map[string]*Position, len(p.openPositions))
+	for k, v := range p.openPositions {
+		cp[k] = v
+	}
+	return cp
 }
 
 // Internal methods
@@ -192,19 +299,27 @@ func (p *Portfolio) validateOrder(ord Order) error {
 			return fmt.Errorf("short positions not allowed")
 		}
 
-		requiredCash := float64(ord.Quantity) * ord.Price // This is simplified; true cost depends on leverage & margin
-		if ord.Side == Long && p.settings.DefaultLeverage > 0 && ord.Leverage > 0 {
-			requiredCash /= ord.Leverage // Assuming ord.Leverage is used if > 0, else DefaultLeverage
-		} else if ord.Side == Long && p.settings.DefaultLeverage > 0 {
-			requiredCash /= p.settings.DefaultLeverage
-		}
-		// TODO: Add margin calculation for short positions here for cash validation
+		// Long and short entries both require cash for margin (+ fees unless
+		// AllowNegativeCashFromFees). Previously shorts skipped this check.
+		if ord.Side == Long || ord.Side == Short {
+			if p.cash <= 0 {
+				return fmt.Errorf("insufficient cash: have %.2f, balance is non-positive", p.cash)
+			}
 
-		if requiredCash > p.cash {
-			return fmt.Errorf("insufficient cash: have %.2f, need %.2f (considering leverage/margin)", p.cash, requiredCash)
+			if p.settings.AllowNegativeCashFromFees {
+				// Only the margin (order value) must fit in cash; fees may push balance negative
+				lev := effectiveLeverage(ord, p.settings)
+				margin := marginRequired(ord.Quantity, ord.Price, lev)
+				if margin > p.cash {
+					return fmt.Errorf("insufficient cash: have %.2f, need %.2f (margin)", p.cash, margin)
+				}
+			} else {
+				requiredCash := p.entryCashDelta(ord)
+				if requiredCash > p.cash {
+					return fmt.Errorf("insufficient cash: have %.2f, need %.2f (margin + fees)", p.cash, requiredCash)
+				}
+			}
 		}
-
-		// Removed MaxPositions check as per user feedback to make it strategy-dependent
 
 	case Exit:
 		pos, exists := p.openPositions[ord.Instrument]
@@ -227,47 +342,73 @@ func (p *Portfolio) handleEntryOrder(ord Order) error {
 			return err
 		}
 		p.openPositions[ord.Instrument] = newPos
-		pos = newPos
 	} else {
 		if err := pos.AddOrder(ord); err != nil {
 			return err
 		}
 	}
 
-	// TODO: Adjust cash based on actual execution price (with slippage, brokerage)
-	// TODO: For longs, cash -= (executedPrice * quantity) / leverage + brokerage
-	// TODO: For shorts, cash -= (executedPrice * quantity * initialMarginRate) + brokerage
-	// The current cash deduction is simplified and doesn't account for leverage or full costs.
-	cost := float64(ord.Quantity) * ord.Price // Placeholder for actual cost
-	if p.settings.DefaultLeverage > 1.0 && ord.Side == Long {
-		// This simple division isn't quite right for margin accounting but approximates leveraged cost.
-		cost /= p.settings.DefaultLeverage
-	}
-	p.cash -= cost
+	p.cash -= p.entryCashDelta(ord)
 	p.orderHistory = append(p.orderHistory, ord)
+
+	// Track costs
+	ctx := TradeCostContext{
+		Order:    ord,
+		Notional: float64(ord.Quantity) * ord.Price,
+		Settings: *p.settings,
+	}
+	brokerage := p.costCalc().Brokerage(ctx)
+	txnTax := p.costCalc().TransactionTax(ctx)
+	p.totalBrokerage += brokerage
+	p.brokerageBuySide += brokerage
+	p.totalTransactionTax += txnTax
+	p.transactionTaxBuySide += txnTax
+	p.totalInvestment += float64(ord.Quantity) * ord.Price
+
 	return nil
 }
 
 func (p *Portfolio) handleExitOrder(ord Order) error {
 	pos, exists := p.openPositions[ord.Instrument]
 	if !exists {
-		return fmt.Errorf("no position found for %s", ord.Instrument)
+		return fmt.Errorf("no open position for %s", ord.Instrument)
 	}
+
+	prevRealized := pos.RealizedPnL
+	openPrice := pos.OpenPrice
+	leverage := pos.Leverage
+	openTime := pos.OpenTime
 
 	if err := pos.AddOrder(ord); err != nil {
 		return err
 	}
 
-	// TODO: Adjust cash based on actual execution price (with slippage, brokerage) and P&L
-	// TODO: cash += (executedPrice * quantity) +/- PnL - brokerage (for longs)
-	// TODO: cash += (shortProceeds + initialMarginBlocked) +/- PnL - brokerage (for shorts)
-	// The current cash addition is simplified.
-	proceeds := float64(ord.Quantity) * ord.Price // Placeholder for actual proceeds
-	p.cash += proceeds
+	realizedSlice := pos.RealizedPnL - prevRealized
+	holding := ord.FilledAt.Sub(openTime)
+	if holding < 0 {
+		holding = 0
+	}
+
+	p.cash += p.exitCashDelta(ord, openPrice, leverage, realizedSlice, holding)
+
+	// Track costs
+	ctx := TradeCostContext{
+		Order:          ord,
+		Notional:       float64(ord.Quantity) * ord.Price,
+		RealizedProfit: realizedSlice,
+		HoldingPeriod:  holding,
+		Settings:       *p.settings,
+	}
+	brokerage := p.costCalc().Brokerage(ctx)
+	txnTax := p.costCalc().TransactionTax(ctx)
+	cgt := p.costCalc().CapitalGainsTax(ctx)
+	p.totalBrokerage += brokerage
+	p.brokerageSellSide += brokerage
+	p.totalTransactionTax += txnTax
+	p.transactionTaxSellSide += txnTax
+	p.totalCapitalGainsTax += cgt
 
 	if pos.Status == Closed {
-		// TODO: Handle tax calculation on realized P&L here
-		// TODO: Handle profit pocketing here
 		p.closedPositions = append(p.closedPositions, pos)
 		delete(p.openPositions, ord.Instrument)
 	}
@@ -280,7 +421,8 @@ func (p *Portfolio) updatePosition(pos *Position, currentPrice float64) {
 	pos.UpdatePrice(currentPrice)
 }
 
-// GetPositionMetrics returns detailed metrics for a position
+// GetPositionMetrics returns a snapshot of performance metrics for the open
+// position identified by instrument. Returns an error if no such position exists.
 func (p *Portfolio) GetPositionMetrics(instrument string) (*PositionMetrics, error) {
 	pos, exists := p.openPositions[instrument]
 	if !exists {
@@ -296,7 +438,8 @@ func (p *Portfolio) GetPositionMetrics(instrument string) (*PositionMetrics, err
 	}, nil
 }
 
-// PositionMetrics holds detailed position metrics
+// PositionMetrics is a read-only snapshot of key performance indicators for a
+// single open position.
 type PositionMetrics struct {
 	ROI           float64
 	Duration      time.Duration
@@ -305,7 +448,8 @@ type PositionMetrics struct {
 	UnrealizedPnL float64
 }
 
-// GetPortfolioStats returns overall portfolio statistics
+// GetPortfolioStats computes and returns aggregate statistics across all open
+// and closed positions. Prefer the shorter alias [Portfolio.Stats].
 func (p *Portfolio) GetPortfolioStats() PortfolioStats {
 	var stats PortfolioStats
 	stats.TotalValue = p.Value()
@@ -331,10 +475,20 @@ func (p *Portfolio) GetPortfolioStats() PortfolioStats {
 		stats.TotalRealizedPnL += pos.RealizedPnL
 	}
 
+	stats.TotalBrokerage = p.totalBrokerage
+	stats.BrokerageBuySide = p.brokerageBuySide
+	stats.BrokerageSellSide = p.brokerageSellSide
+	stats.TotalTransactionTax = p.totalTransactionTax
+	stats.TransactionTaxBuySide = p.transactionTaxBuySide
+	stats.TransactionTaxSellSide = p.transactionTaxSellSide
+	stats.TotalCapitalGainsTax = p.totalCapitalGainsTax
+	stats.TotalInvestment = p.totalInvestment
+
 	return stats
 }
 
-// PortfolioStats holds overall portfolio statistics
+// PortfolioStats is a value snapshot of portfolio-wide performance and cost
+// accumulators, produced by [Portfolio.Stats] or [Portfolio.GetPortfolioStats].
 type PortfolioStats struct {
 	TotalValue         float64
 	Cash               float64
@@ -346,4 +500,14 @@ type PortfolioStats struct {
 	LosingTrades       int
 	TotalUnrealizedPnL float64
 	TotalRealizedPnL   float64
+
+	// Cost accumulators
+	TotalBrokerage        float64
+	BrokerageBuySide      float64
+	BrokerageSellSide     float64
+	TotalTransactionTax   float64
+	TransactionTaxBuySide float64
+	TransactionTaxSellSide float64
+	TotalCapitalGainsTax  float64
+	TotalInvestment       float64
 }
