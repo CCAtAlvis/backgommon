@@ -2,9 +2,14 @@
 
 This section provides detailed documentation for the sub-packages within the `pkg` directory, which form the core building blocks of the Backgommon backtesting framework.
 
+**New to Backgommon?** Start with the [user documentation hub](../README.md), not this page.
+
 ## Table of Contents
 
+*   [Execution (`execution`)](./execution/execution.md) — order fill pricing
 *   [Indicators (`indicators`)](./indicators/indicators.md)
+*   [Output (`output`)](./output/output.md) — JSON export, HTML reports, equity curve charts
+*   [Reporting storage](../reporting-storage.md) — zstd artifacts, shared viewer, serve, future retention
 *   [Types (`types`)](./types/types.md)
 *   [Core (`core`)](./core/core.md)
 *   [Interfaces (`interfaces`)](./interfaces/interfaces.md)
@@ -19,8 +24,8 @@ This section provides detailed documentation for the sub-packages within the `pk
 
 The Backgommon framework is designed for modularity and extensibility. Here's how the main subpackages interact during a typical backtest:
 
-1.  **Strategy** (`strategy`, `interfaces`):
-    *   User implements a custom strategy by embedding `BaseStrategy` and overriding relevant methods (e.g., `OnTick`).
+1.  **Strategy** (your code in `examples/` or your app; embed `pkg/strategy.BaseStrategy`):
+    *   Implement `OnTick` and return orders. See [writing-a-strategy.md](../writing-a-strategy.md).
     *   The strategy receives market data (candles) and returns orders to be executed.
 
 2.  **Runner** (`runner`):
@@ -84,4 +89,4 @@ fmt.Println("Final portfolio value:", pf.Value())
 - The **Runner** coordinates the flow, calling the strategy and updating the portfolio.
 - The **Portfolio** processes orders and tracks positions.
 - The **Risk Manager** validates orders and enforces exit rules.
-- **Indicators** and **Types/Core** provide reusable building blocks for all components. 
+- **Indicators** and **Types/Core** provide reusable building blocks for all components.

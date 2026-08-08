@@ -5,6 +5,15 @@ Coordinates the entire backtesting process, managing the strategy, portfolio, ri
 
 ---
 
+## User guides (read these first)
+
+- [Getting started](../../getting-started.md)
+- [Writing a strategy](../../writing-a-strategy.md)
+- [Order fill pricing](../../order-fill.md) — `WithFillMode`, `WithFillPricer`, `FillContext`
+- [Indicators](../../indicators-application.md) — `WithIndicators`
+
+---
+
 ## User Documentation
 
 This section is for developers who are setting up and running backtests using the Backgommon framework.
@@ -18,7 +27,10 @@ This section is for developers who are setting up and running backtests using th
 *   **Data Input**: Market data is provided to the `Runner` typically as a `*types.TimeseriesTable[core.Candle]`.
 *   **Starting a Backtest**: The `runner.Start()` method kicks off the backtesting simulation.
 *   **Results**: After a backtest, results can be accessed from the `types.Results` struct (if configured with `WithResults`) and the `EquityCurve` (a slice of `types.AccountValue`) which is often a field within the `Runner` itself or the `Results` struct.
-*   **`IndicatorConfig`**: An optional configuration to specify indicators that should be pre-calculated by the `Runner` or `TimeseriesTable` across the dataset before the strategy's `OnTick` is called.
+*   **`WithIndicators`**: Pre-computes indicators on the data table at the start of `Start()`.
+*   **`WithFillMode` / `WithFillPricer`**: Controls how unset order prices are filled. See [order-fill.md](../../order-fill.md).
+*   **`WithStrictOrderProcessing`**: When `true`, the first rejected order aborts the backtest. Default `false` skips failed orders and continues (see `Results.SkippedOrders`).
+*   **`PrintResults`**: Prints a human-readable summary from `types.Results` after `Start()`.
 
 ### Setting Up and Running a Backtest
 

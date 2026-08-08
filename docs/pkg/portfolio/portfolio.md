@@ -22,7 +22,7 @@ This section is for developers who need to understand how the portfolio system w
     *   It processes `Order` objects from your strategy.
     *   Tracks `cash`, `openPositions`, and `closedPositions`.
     *   While your strategy is given a `PortfolioManager` interface (which the `Portfolio` implements), direct manipulation from the strategy is usually limited. The primary interaction is submitting orders and receiving updates via `OnOrderFilled`, `OnPositionOpened`, `OnPositionClosed` callbacks.
-*   **`Settings`**: Configuration for the portfolio, such as `InitialCapital`, `AllowShorts`, `MaxPositions`.
+*   **`Settings`**: Configuration for the portfolio — capital, leverage, brokerage, taxes, SIP, interest, and embedded `ExecutionSettings`. See [Portfolio settings & costs](../../portfolio-and-costs.md).
 
 ### Interaction from a Strategy
 
@@ -56,21 +56,24 @@ This section is for developers working on the `portfolio` package itself or need
 
 ### Main Files
 
-*   `portfolio.go`: Contains the main `Portfolio` struct and its logic for managing cash, positions, processing orders, and calculating overall portfolio statistics. Defines `Settings`, `PositionMetrics`, `PortfolioStats`.
+*   `portfolio.go`: Main `Portfolio` struct, order processing, stats, periodic events.
+*   `costs.go`: Brokerage, transaction tax, capital gains tax helpers.
+*   `trade.go`: Margin and cash delta calculations.
+*   `periodic.go`: SIP, interest, leverage cost, management fee.
 *   `position.go`: Defines the `Position` struct, `PositionStatus` enum, and methods for managing individual positions (e.g., adding orders to an existing position, updating PnL, tracking metrics like ROI, duration).
 *   `order.go`: Defines the `Order` struct, `OrderSide` and `OrderType` enums, and helper functions like `NewOrder` and `Fill`.
 
 ### Key Types & Internal Flow
 
 *   **`Portfolio` (struct)**:
-    *   **State**: Holds `cash`, `openPositions (map[string]*Position)`, `closedPositions ([]*Position)`, `orderHistory ([]Order)`, and `settings (*Settings)`.
-    *   **Order Processing (`ProcessOrder`)**: This is a core method.
-        1.  Validates the order (e.g., sufficient cash, allowed shorts, max positions).
-        2.  If an entry order for a new instrument, creates a new `Position`.
-        3.  If an entry order for an existing position, updates the `Position` (e.g., average price, quantity).
-        4.  If an exit order, updates the `Position`, calculates realized PnL, and potentially moves the position from open to closed.
-        5.  Adjusts `cash` based on the order.
-    *   **Position Updates (`UpdatePositions`)**: Takes a map of current market prices and updates the `UnrealizedPnL` and other price-dependent metrics for all open positions.
+    *   **State**: Holds `cash`, `openPositions`, `closedPositions`, `orderHistory`, `settings`, and periodic event timestamps.
+    *   **Order Processing (`ProcessOrder`)**:
+        1.  `normalizeOrder` — resolves `Quantity: 0` exits to full size; applies default leverage
+        2.  Validates the order (cash including fees, allowed shorts)
+        3.  Entry/exit handling with margin, brokerage, transaction tax, and capital gains tax
+        4.  Adjusts `cash` via `entryCashDelta` / `exitCashDelta`
+    *   **Periodic events (`ProcessPeriodicEvents`)**: SIP, idle cash interest, leverage cost, management fee
+    *   **Position Updates (`UpdatePositions`)**: Marks open positions to market
 *   **`Position` (struct)**:
     *   **Lifecycle**: Created by an entry `Order`. Modified by subsequent entry/exit `Order`s for the same instrument. Status changes from `Open` to `PartiallyOpen` (if applicable) to `Closed`.
     *   **Metrics**: Tracks `OpenPrice`, `ClosePrice`, `Quantity`, `Leverage`, `RealizedPnL`, `UnrealizedPnL`, `MaxDrawdown`, `HighestPrice`, `LowestPrice`, etc.
@@ -83,5 +86,5 @@ This section is for developers working on the `portfolio` package itself or need
 ### Extensibility
 
 *   **Custom `PortfolioManager`**: If the default `Portfolio` logic is insufficient (e.g., for specific brokerage simulations, margin rules, or fee models), one can implement the `interfaces.PortfolioManager` with custom logic.
-*   **Fee Models/Slippage**: The current `Portfolio.ProcessOrder` is a good place to integrate more complex fee models or slippage simulation if desired.
+*   **Fee Models/Slippage**: Slippage is applied in the runner via `execution.ApplySlippage`; brokerage and taxes are in `costs.go` and wired through `ProcessOrder`.
 *   **Advanced Order Types**: If more order types beyond simple entry/exit are needed (e.g., limit, stop-limit), the `Order` type and `Portfolio.ProcessOrder` logic would need extension. 

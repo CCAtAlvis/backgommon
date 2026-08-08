@@ -1,36 +1,79 @@
-# backgommon
-Backgommon is a backtesting and simulation framework for trading strategies, written in pure go. It aims to be fast, flexible and easy to use.
+# Backgommon
 
-#### NOTE: code in this repo is being transferred from a private repo (which has my own strategy, some secret keys, and PII data) I will be cleaning the code and removing the PII data and secret keys. Please be patient while I transfer the code, make it public and write some documentation.
+Backgommon is a backtesting framework for trading strategies, written in Go. It supports **portfolio-level** backtests: one symbol or many, long-only or long/short, with modular risk and execution simulation.
 
-## Why a(nother) backtesting framework?
-I created this project primarily to learn go and backtest and implement some trading strategies. When I searched for backtesting frameworks, across all languages, most of them (all?) were about testing strategies on a single ticker/scrip/asset. What I wanted was a framework that could backtest strategy on portfolio of assets and buy/sell/manage a portfolio. And thus backgommon was born.
+> A portfolio can have a single asset — you do not need multiple symbols.
 
-> Note: number of assets in portfolio can as well be 1, so you can use it for single asset backtesting, not that you have to stick to multi-asset portfolio only.
+---
 
-Initially it was made as a closed source application and was highly coupled with my own strategies, the framework itself was simple and fast but it was not very flexible. I had plans to make it open source since the beginning but couldn't since it was highly coupled with my strategies. Now I have decided to "kind of" write it from scratch making it open source, clean, flexible, and easy to use.
+## Documentation
 
-## WIP
-As I mentioned this project is a work in progress, I will be adding more features and improving the codebase over time. If you would like to contribute, please feel free to open a pull request. Also as one of the aims of this project, for me, was to learn golang, please feel free to critique the codebase and suggest improvements!
+**Start here:** [docs/README.md](docs/README.md) — guided path from first backtest to custom fill logic.
 
-## What backgommon is not?
-Backgommon is not a high frequency trading framework, it is not designed for HFT. You would probably want to write your HFT strategies in C++ or Rust or C++ or Zig or C++ or Java maybe?
+| Guide | Description |
+|-------|-------------|
+| [Getting started](docs/getting-started.md) | Run your first backtest |
+| [Writing a strategy](docs/writing-a-strategy.md) | `OnTick`, orders, `BaseStrategy` |
+| [Loading market data](docs/loading-data.md) | JSON & CSV OHLCV formats |
+| [Indicators](docs/indicators-application.md) | Pre-compute vs in-strategy |
+| [Order fill pricing](docs/order-fill.md) | `FillContext`, `FillPricer`, fill modes |
 
-Having said that, I have come to realize that go is pretty fast and maybe with some optimizations and good system design, backgommon can be used for HFT as well. And having said that, I **don't** have plans to add HFT support in the foreseeable future.
+Examples: [examples/README.md](examples/README.md) · Package reference: [docs/pkg/](docs/pkg/index.md)
 
-## Not just backtesting...
-... but also live trading. I have plans to add live trading support as well. I have already written a web server for live strategy and portfolio monitoring, which I will be cleaning and adding to this repo.
+---
 
-Live trading system aims to be a simple plug-n-play solution, where you can plug in your input feed (from your broker or any other source) via multiple interfaces and let backgommon take care of the rest. Generated signals can then be fed to your broker/alert systems again via multiple interfaces.
+## Quick run
 
-## Features
-- TODO
-- yeah i need to classify what would count as a feature and list it down here
-- so thats a TODO
+```bash
+go run ./examples/strategies/sma_crossover/
+go run ./examples/strategies/sma_crossover/ -data /path/to/prices.json
+```
 
-## TODO
-- Adding more technical indicator
-- Monte Carlo simulation
-- Graph plotting
-- Web server for live strategy and portfolio monitoring (copy pasting and cleaning from a crappy private repo)
-- MOREEE Documentation
+---
+
+## Why Backgommon?
+
+Most backtesters focus on a **single ticker**. Backgommon is built around a **time × symbols** table: each row is a date, each column is an instrument. That matches how portfolio strategies actually work.
+
+---
+
+## Project layout
+
+```
+backgommon/
+├── pkg/           # Framework only (runner, portfolio, risk, indicators, …)
+├── examples/      # Example strategies & demos (your templates live here)
+├── docs/          # User guides + package reference
+└── cmd/           # CLI tools (future)
+```
+
+**Your strategies do not go in `pkg/`.** Put them in `examples/` or your own application that imports this module.
+
+---
+
+## Features (current)
+
+- Bar-by-bar backtest **runner** with equity curve and results summary
+- **Portfolio** and **risk** managers (configurable settings)
+- Technical **indicators** (SMA, EMA, MACD, custom) on `TimeseriesTable`
+- Pluggable **order fill** simulation (`FillPricer`, multiple bar-price modes)
+- **JSON / CSV** data loaders (generic OHLCV, not exchange-specific)
+- Reference **SMA crossover** example
+
+Planned: brokerage/slippage in portfolio, live trading adapter, more indicators. See [framework task list](docs/prd/backgommon-framework/backgommon-framework-task-list.md).
+
+---
+
+## What Backgommon is not
+
+- Not an HFT engine
+- Not a broker API or data vendor
+- Not a guarantee of profitable strategies
+
+---
+
+## Status
+
+Work in progress — APIs may change. Contributions welcome.
+
+**Note:** This repo was migrated from a private codebase; documentation and APIs are stabilizing.

@@ -17,6 +17,7 @@ This section is for developers who will be implementing these interfaces, partic
     *   `OnOrderFilled(order portfolio.Order)`: Callback triggered after an order you issued has been successfully processed (filled) by the portfolio.
     *   `OnPositionOpened(position portfolio.Position)`: Callback triggered when a new position is opened as a result of an order.
     *   `OnPositionClosed(position portfolio.Position)`: Callback triggered when an existing position is closed.
+*   **`FillPricer`**: Implement to customize how the runner sets execution prices on orders with `Price == 0`. See [order-fill.md](../../order-fill.md). Most users use `runner.WithFillMode` instead of implementing this directly.
 *   **`Indicator`**: Implement this interface if you are creating a custom technical indicator that is not covered by the standard ones or `indicators.CustomIndicator`.
     *   `Calculate(candles []core.Candle) core.Value`: Your logic to compute the indicator's value from a series of candles.
     *   `Name() string`: A unique name for your indicator instance (e.g., "MyRSI_14"). This is used for storing/retrieving from `core.Candle` and for dependency management.
