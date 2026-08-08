@@ -6,9 +6,16 @@ import (
 	"github.com/CCAtAlvis/backgommon/pkg/portfolio"
 )
 
-// checkExitConditions checks if a position should be exited
+// checkExitConditions evaluates stop-loss, take-profit, and trailing-stop
+// rules against currentPrice for a single position. It returns whether the
+// position should be closed and a reason string for logging.
+//
+// IMPORTANT: this method has a side-effect — when a trailing stop is enabled
+// it updates pos.TrailingStopHigh in place (raising it for longs, lowering it
+// for shorts) to track the high-water mark. Callers must be aware that the
+// Position is mutated even when no exit is triggered.
 func (m *Manager) checkExitConditions(pos *portfolio.Position, currentPrice float64) (bool, string) {
-	if !m.settings.UseStopLoss && !m.settings.UseTakeProfit && !m.settings.UseTrailingStop {
+	if !m.settings.EnableStopLoss && !m.settings.EnableTakeProfit && !m.settings.EnableTrailingStop {
 		return false, ""
 	}
 
@@ -19,29 +26,23 @@ func (m *Manager) checkExitConditions(pos *portfolio.Position, currentPrice floa
 }
 
 func (m *Manager) checkLongExitConditions(pos *portfolio.Position, currentPrice float64) (bool, string) {
-	// Stop Loss
-	if m.settings.UseStopLoss {
-		stopPrice := pos.OpenPrice * (1 - m.settings.DefaultStopLoss)
-		if currentPrice <= stopPrice {
+	if m.settings.EnableStopLoss {
+		if currentPrice <= calculateStopLossPrice(pos, m.settings.DefaultStopLossRate) {
 			return true, "stop_loss"
 		}
 	}
 
-	// Take Profit
-	if m.settings.UseTakeProfit {
-		takeProfitPrice := pos.OpenPrice * (1 + m.settings.DefaultTakeProfit)
-		if currentPrice >= takeProfitPrice {
+	if m.settings.EnableTakeProfit {
+		if currentPrice >= calculateTakeProfitPrice(pos, m.settings.DefaultTakeProfitRate) {
 			return true, "take_profit"
 		}
 	}
 
-	// Trailing Stop
-	if m.settings.UseTrailingStop {
+	if m.settings.EnableTrailingStop {
 		if currentPrice > pos.TrailingStopHigh {
 			pos.TrailingStopHigh = currentPrice
 		}
-		stopPrice := pos.TrailingStopHigh * (1 - m.settings.DefaultTrailingStop)
-		if currentPrice <= stopPrice {
+		if currentPrice <= calculateTrailingStopPrice(pos, m.settings.DefaultTrailingStopRate) {
 			return true, "trailing_stop"
 		}
 	}
@@ -50,29 +51,23 @@ func (m *Manager) checkLongExitConditions(pos *portfolio.Position, currentPrice 
 }
 
 func (m *Manager) checkShortExitConditions(pos *portfolio.Position, currentPrice float64) (bool, string) {
-	// Stop Loss
-	if m.settings.UseStopLoss {
-		stopPrice := pos.OpenPrice * (1 + m.settings.DefaultStopLoss)
-		if currentPrice >= stopPrice {
+	if m.settings.EnableStopLoss {
+		if currentPrice >= calculateStopLossPrice(pos, m.settings.DefaultStopLossRate) {
 			return true, "stop_loss"
 		}
 	}
 
-	// Take Profit
-	if m.settings.UseTakeProfit {
-		takeProfitPrice := pos.OpenPrice * (1 - m.settings.DefaultTakeProfit)
-		if currentPrice <= takeProfitPrice {
+	if m.settings.EnableTakeProfit {
+		if currentPrice <= calculateTakeProfitPrice(pos, m.settings.DefaultTakeProfitRate) {
 			return true, "take_profit"
 		}
 	}
 
-	// Trailing Stop
-	if m.settings.UseTrailingStop {
+	if m.settings.EnableTrailingStop {
 		if currentPrice < pos.TrailingStopHigh {
 			pos.TrailingStopHigh = currentPrice
 		}
-		stopPrice := pos.TrailingStopHigh * (1 + m.settings.DefaultTrailingStop)
-		if currentPrice >= stopPrice {
+		if currentPrice >= calculateTrailingStopPrice(pos, m.settings.DefaultTrailingStopRate) {
 			return true, "trailing_stop"
 		}
 	}
@@ -80,31 +75,38 @@ func (m *Manager) checkShortExitConditions(pos *portfolio.Position, currentPrice
 	return false, ""
 }
 
-// createExitOrder creates an exit order for a position
+// createExitOrder builds an exit order that fully closes the given position,
+// preserving the original side and leverage. The reason string is stored on the
+// returned Order so downstream code can inspect why the exit was triggered.
 func createExitOrder(pos *portfolio.Position, reason string) portfolio.Order {
-	return portfolio.NewOrder(
+	ord := portfolio.NewOrder(
 		pos.Instrument,
 		pos.Side,
 		portfolio.Exit,
 		pos.Quantity,
 		pos.Leverage,
 	)
+	ord.Reason = reason
+	return ord
 }
 
-// Additional helper functions for risk management
-
-// GetPositionRisk calculates the risk metrics for a position
+// GetPositionRisk computes a snapshot of the current risk levels for a
+// position: where the stop-loss, take-profit, and trailing-stop would
+// trigger, the maximum monetary loss if the stop-loss fires, and the
+// risk-reward ratio. Useful for dashboards, logging, and strategy
+// introspection. Does not mutate any state.
 func (m *Manager) GetPositionRisk(pos *portfolio.Position, currentPrice float64) PositionRisk {
 	return PositionRisk{
-		StopLossPrice:     calculateStopLossPrice(pos, m.settings.DefaultStopLoss),
-		TakeProfitPrice:   calculateTakeProfitPrice(pos, m.settings.DefaultTakeProfit),
-		TrailingStopPrice: calculateTrailingStopPrice(pos, m.settings.DefaultTrailingStop),
-		MaxLoss:           calculateMaxLoss(pos, currentPrice, m.settings.DefaultStopLoss),
+		StopLossPrice:     calculateStopLossPrice(pos, m.settings.DefaultStopLossRate),
+		TakeProfitPrice:   calculateTakeProfitPrice(pos, m.settings.DefaultTakeProfitRate),
+		TrailingStopPrice: calculateTrailingStopPrice(pos, m.settings.DefaultTrailingStopRate),
+		MaxLoss:           calculateMaxLoss(pos, currentPrice, m.settings.DefaultStopLossRate),
 		RiskRewardRatio:   calculateRiskRewardRatio(pos, currentPrice, m.settings),
 	}
 }
 
-// PositionRisk holds risk metrics for a position
+// PositionRisk holds a point-in-time snapshot of the risk metrics for a
+// single open position. All prices are absolute (not percentages).
 type PositionRisk struct {
 	StopLossPrice     float64
 	TakeProfitPrice   float64
@@ -113,7 +115,6 @@ type PositionRisk struct {
 	RiskRewardRatio   float64
 }
 
-// Helper functions for risk calculations
 func calculateStopLossPrice(pos *portfolio.Position, stopLoss float64) float64 {
 	if pos.Side == portfolio.Long {
 		return pos.OpenPrice * (1 - stopLoss)
@@ -141,12 +142,12 @@ func calculateMaxLoss(pos *portfolio.Position, currentPrice, stopLoss float64) f
 }
 
 func calculateRiskRewardRatio(pos *portfolio.Position, currentPrice float64, settings *Settings) float64 {
-	if !settings.UseStopLoss || !settings.UseTakeProfit {
+	if !settings.EnableStopLoss || !settings.EnableTakeProfit {
 		return 0
 	}
 
-	stopLossPrice := calculateStopLossPrice(pos, settings.DefaultStopLoss)
-	takeProfitPrice := calculateTakeProfitPrice(pos, settings.DefaultTakeProfit)
+	stopLossPrice := calculateStopLossPrice(pos, settings.DefaultStopLossRate)
+	takeProfitPrice := calculateTakeProfitPrice(pos, settings.DefaultTakeProfitRate)
 
 	risk := math.Abs(currentPrice - stopLossPrice)
 	reward := math.Abs(takeProfitPrice - currentPrice)

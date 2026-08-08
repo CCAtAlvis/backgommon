@@ -1,3 +1,9 @@
+// Package risk enforces portfolio-level risk limits, position sizing, and
+// automatic exit conditions (stop-loss, take-profit, trailing stop) for the
+// backgommon backtesting framework. The central type is [Manager], which wraps
+// a [Settings] struct and delegates position sizing and drawdown evaluation to
+// injectable [PositionSizer] and [DrawdownPolicy] hooks. Use [New] with
+// functional [Option] values to construct a configured Manager.
 package risk
 
 import (
@@ -22,12 +28,52 @@ const (
 	LiquidateAllPositions MaxDrawdownMode = "LiquidateAllPositions"
 )
 
-// Manager handles risk management
-type Manager struct {
-	settings *Settings
+// Logger is an optional interface for risk event logging.
+// When nil, risk events are silently discarded.
+type Logger interface {
+	Printf(format string, args ...interface{})
 }
 
-// Settings contains risk management settings
+// StdLogger writes risk events to stdout via fmt.Printf.
+// Use risk.WithLogger(risk.StdLogger{}) to restore the original logging behavior.
+type StdLogger struct{}
+
+func (StdLogger) Printf(format string, args ...interface{}) {
+	fmt.Printf(format, args...)
+}
+
+// Manager is the primary risk gate for the runner loop. It validates every
+// order against portfolio-level limits (allocation caps, leverage caps,
+// drawdown locks) and evaluates per-position exit conditions on each bar.
+//
+// Behaviour is customised through injectable hooks:
+//   - [PositionSizer] — controls how many shares/units to buy (default:
+//     [StandardPositionSizer] using risk-per-trade and stop-loss rate).
+//   - [DrawdownPolicy] — decides what happens when peak-to-trough equity
+//     loss exceeds the configured threshold (default: [StandardDrawdownPolicy]).
+//
+// Use [New] with [WithPositionSizer] and/or [WithDrawdownPolicy] to override.
+type Manager struct {
+	settings        *Settings
+	peakEquity      float64
+	lockUntil       time.Time
+	blockNewEntries bool
+
+	positionSizer  PositionSizer
+	drawdownPolicy DrawdownPolicy
+	logger         Logger
+}
+
+func (m *Manager) logf(format string, args ...interface{}) {
+	if m.logger != nil {
+		m.logger.Printf(format, args...)
+	}
+}
+
+// Settings holds all declarative risk parameters for a backtest. Fields are
+// grouped into portfolio-level limits, position-level limits, order-level
+// defaults, and metrics configuration. Zero values disable the corresponding
+// check (e.g. MaxLeverage == 0 means leverage is uncapped).
 type Settings struct {
 	// --- Portfolio-Level Risk ---
 
@@ -92,21 +138,38 @@ type Settings struct {
 	MetricsRiskFreeAnnualRate float64
 }
 
-// New creates a new risk manager
-func New(settings *Settings) *Manager {
-	return &Manager{settings: settings}
+// New creates a new risk manager with optional hooks.
+func New(settings *Settings, opts ...Option) *Manager {
+	m := &Manager{settings: settings}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
-// ValidateOrder checks if an order meets risk requirements
+// Settings returns the risk settings for external inspection (e.g., metrics computation).
+func (m *Manager) Settings() *Settings {
+	return m.settings
+}
+
+// ValidateOrder checks whether ord satisfies the current risk constraints.
+// For entry orders it verifies that:
+//   - New entries are not blocked by an active drawdown lock.
+//   - The position's notional value does not exceed MaxPositionAllocationRate
+//     of the current portfolio value.
+//   - The order's leverage does not exceed MaxLeverage.
+//
+// Exit orders bypass the drawdown-block check. Returns a descriptive error
+// when a constraint is violated; nil means the order is acceptable.
 func (m *Manager) ValidateOrder(portfolioManager interfaces.PortfolioManager, ord portfolio.Order) error {
-	// Position size checks
+	if ord.Type == portfolio.Entry && m.blockNewEntries {
+		return fmt.Errorf("new entries blocked: portfolio drawdown limit active")
+	}
+
 	positionValue := float64(ord.Quantity) * ord.Price
 
-	// MinPositionSize check removed as the setting is no longer part of risk.Settings.
-	// Strategies should enforce their own minimums if required.
-
-	portfolioValue := portfolioManager.Value()    // TODO: Ensure this reflects available capital for sizing
-	if m.settings.MaxPositionAllocationRate > 0 { // Check if the setting is configured
+	portfolioValue := portfolioManager.Value()
+	if m.settings.MaxPositionAllocationRate > 0 {
 		maxSizeAllowedByPercent := portfolioValue * m.settings.MaxPositionAllocationRate
 		if positionValue > maxSizeAllowedByPercent {
 			return fmt.Errorf("position size %.2f (%.2f%% of portfolio) exceeds maximum allowed %.2f (%.2f%% of portfolio)",
@@ -123,7 +186,14 @@ func (m *Manager) ValidateOrder(portfolioManager interfaces.PortfolioManager, or
 	return nil
 }
 
-// CheckPositionExits checks for exit conditions
+// CheckPositionExits iterates all open positions and evaluates stop-loss,
+// take-profit, and trailing-stop exit conditions against the supplied
+// prices. For every position that triggers, an exit [portfolio.Order] is
+// appended to the returned slice and an informational line is printed to
+// stdout. Positions whose instrument is absent from prices are skipped.
+//
+// Note: this method mutates position state (e.g. TrailingStopHigh) as a
+// side-effect of the trailing-stop check — see [Manager.checkExitConditions].
 func (m *Manager) CheckPositionExits(portfolioManager interfaces.PortfolioManager, prices map[string]float64) []portfolio.Order {
 	var exitOrders []portfolio.Order
 
@@ -134,22 +204,10 @@ func (m *Manager) CheckPositionExits(portfolioManager interfaces.PortfolioManage
 		}
 
 		if shouldExit, reason := m.checkExitConditions(pos, currentPrice); shouldExit {
-			// TODO: Create a proper exit order. This function signature might need to change
-			// or we need a helper to create an order of appropriate type (market/limit) and quantity.
-			// For now, assuming a full exit market order.
-			exitOrders = append(exitOrders, portfolio.Order{
-				Instrument: pos.Instrument,
-				Side:       pos.Side.Opposite(), // This needs to be robust
-				Type:       portfolio.Exit,
-				Quantity:   pos.Quantity,
-				Price:      currentPrice, // For market order, this would be fill price
-				// Leverage for exit orders is typically not applicable or 1x.
-			})
-			fmt.Printf("INFO: Exit condition met for %s: %s. Current Price: %.2f\n", pos.Instrument, reason, currentPrice)
+			exitOrders = append(exitOrders, createExitOrder(pos, reason))
+			m.logf("INFO: Exit condition met for %s: %s. Current Price: %.2f\n", pos.Instrument, reason, currentPrice)
 		}
 	}
 
 	return exitOrders
 }
-
-// Additional risk management functions...
