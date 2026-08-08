@@ -1,3 +1,6 @@
+// Package strategy provides base implementations for strategy development.
+// Most users will embed [BaseStrategy] in their own struct so they only need to
+// override the methods they care about (typically OnTick).
 package strategy
 
 import (
@@ -8,10 +11,29 @@ import (
 	"github.com/CCAtAlvis/backgommon/pkg/portfolio"
 )
 
-// BaseStrategy provides default implementations for strategy methods
+// BaseStrategy satisfies the [interfaces.Strategy] interface with no-op
+// defaults. Users embed it in their own strategy struct to avoid implementing
+// every method — typically only OnTick needs a real implementation.
+//
+// BaseStrategy also satisfies the dayLifecycle interface (OnDayStart/OnDayEnd)
+// that the runner detects via type assertion, so day-boundary hooks are
+// automatically available for any strategy that embeds it.
+//
+// Example:
+//
+//	type MyStrategy struct {
+//	    strategy.BaseStrategy
+//	}
+//
+//	func (s *MyStrategy) OnTick(data map[string]core.Candle) []portfolio.Order {
+//	    // your trading logic here
+//	}
 type BaseStrategy struct {
 	Portfolio interfaces.PortfolioManager
-	Settings  interface{}
+	// Settings is a generic holder for strategy-specific configuration (e.g.
+	// indicator periods, position sizing rules). The runner serializes it into
+	// the report's config.json when WithReportSettings is used.
+	Settings interface{}
 }
 
 // OnTick is called for each new data point
@@ -19,6 +41,9 @@ func (s *BaseStrategy) OnTick(data map[string]core.Candle) []portfolio.Order {
 	return nil
 }
 
+// SetPortfolio injects the portfolio manager so the strategy can query
+// positions, cash, and account value during OnTick. Called automatically by the
+// runner during New().
 func (s *BaseStrategy) SetPortfolio(portfolio interfaces.PortfolioManager) {
 	s.Portfolio = portfolio
 }

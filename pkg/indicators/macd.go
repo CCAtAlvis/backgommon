@@ -118,6 +118,9 @@ type MACDValue struct {
 	histogram float64
 }
 
+// NewMACDValue constructs a MACDValue from pre-computed components. This is
+// typically called internally by MACD.Calculate, but is exported so custom
+// indicators that derive from MACD can construct values directly.
 func NewMACDValue(macd, signal, histogram float64) MACDValue {
 	return MACDValue{
 		macd:      macd,
@@ -126,6 +129,8 @@ func NewMACDValue(macd, signal, histogram float64) MACDValue {
 	}
 }
 
+// Value returns the MACD line value (fast EMA − slow EMA). This is the
+// primary signal; crossovers with the signal line indicate momentum shifts.
 func (m MACDValue) Value() float64 {
 	return m.macd
 }
