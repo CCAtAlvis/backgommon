@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>backgommon</title>
+<style>
+:root { --bg:#0f1419; --panel:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --accent:#3d9cf0; --ok:#3ecf8e; --bad:#f07178; --border:#2a3548; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+header { padding:1rem 1.5rem; border-bottom:1px solid var(--border); display:flex; gap:1rem; align-items:center; }
+header h1 { font-size:1.1rem; margin:0; font-weight:600; letter-spacing:.02em; }
+header nav button { background:transparent; border:1px solid var(--border); color:var(--text); padding:.35rem .75rem; border-radius:6px; cursor:pointer; margin-right:.4rem; }
+header nav button.active { border-color:var(--accent); color:var(--accent); }
+main { padding:1.25rem 1.5rem; max-width:1100px; margin:0 auto; }
+main.wide { max-width:none; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:1rem 1.1rem; margin-bottom:1rem; }
+.card h2 { margin:0 0 .75rem; font-size:.95rem; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th, td { text-align:left; padding:.45rem .35rem; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:500; }
+table.trials { font-size:.82rem; }
+table.trials td { white-space:nowrap; }
+table.trials td.params, table.trials td.metrics { white-space:normal; max-width:280px; }
+.chip { display:inline-block; background:#0c1118; border:1px solid var(--border); border-radius:4px; padding:.1rem .35rem; margin:.1rem .2rem .1rem 0; font-size:.75rem; }
+iframe.dash { width:100%; height:70vh; border:1px solid var(--border); border-radius:8px; background:#fff; }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+.muted { color:var(--muted); }
+.badge { display:inline-block; padding:.1rem .45rem; border-radius:999px; font-size:.75rem; border:1px solid var(--border); }
+.badge.done { color:var(--ok); border-color:var(--ok); }
+.badge.failed, .badge.canceled { color:var(--bad); border-color:var(--bad); }
+.badge.running, .badge.queued { color:var(--accent); border-color:var(--accent); }
+label { display:block; font-size:.8rem; color:var(--muted); margin:.5rem 0 .2rem; }
+input, textarea, select { width:100%; background:#0c1118; border:1px solid var(--border); color:var(--text); padding:.45rem .55rem; border-radius:6px; font:inherit; }
+button.primary { background:var(--accent); color:#061018; border:none; padding:.5rem 1rem; border-radius:6px; font-weight:600; cursor:pointer; margin-top:.75rem; }
+button.danger { background:transparent; color:var(--bad); border:1px solid var(--bad); padding:.35rem .7rem; border-radius:6px; cursor:pointer; }
+.row { display:flex; gap:1rem; flex-wrap:wrap; }
+.row > * { flex:1; min-width:260px; }
+pre.err { white-space:pre-wrap; color:var(--bad); font-size:.8rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>backgommon</h1>
+  <nav>
+    <button data-view="home" class="active">Catalog</button>
+    <button data-view="strategy">Strategy</button>
+    <button data-view="sweep">Sweep</button>
+  </nav>
+</header>
+<main id="app"></main>
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+const app = $('#app');
+let state = { view:'home', strategy:null, artifact:null };
+
+document.querySelectorAll('header nav button').forEach(b => {
+  b.onclick = () => { state.view = b.dataset.view; render(); document.querySelectorAll('header nav button').forEach(x => x.classList.toggle('active', x===b)); };
+});
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(typeof j === 'object' && j.error ? j.error : (t || r.statusText));
+  return j;
+}
+
+async function render() {
+  try {
+    app.parentElement.classList.toggle('wide', state.view === 'sweep');
+    document.querySelector('main').classList.toggle('wide', state.view === 'sweep');
+    if (state.view === 'home') await renderHome();
+    else if (state.view === 'strategy') await renderStrategy();
+    else if (state.view === 'sweep') await renderSweep();
+  } catch (e) {
+    app.innerHTML = '<div class="card"><pre class="err">'+esc(e.message)+'</pre></div>';
+  }
+}
+
+function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function fmtNum(v) {
+  if (v == null || Number.isNaN(+v)) return '—';
+  const n = +v;
+  if (!Number.isFinite(n)) return '—';
+  if (Math.abs(n) > 1e6) return n.toExponential(2);
+  if (Math.abs(n) >= 100) return n.toFixed(1);
+  if (Math.abs(n) >= 1) return n.toFixed(3);
+  return n.toFixed(4);
+}
+
+function paramChips(params) {
+  if (!params || typeof params !== 'object') return '';
+  return Object.keys(params).filter(k => !['custom_field','CustomField'].includes(k)).map(k =>
+    '<span class="chip"><span class="muted">'+esc(k)+'</span> '+esc(params[k])+'</span>'
+  ).join('');
+}
+
+function metricCells(metrics, keys) {
+  return keys.map(k => '<td>'+fmtNum(metrics && metrics[k])+'</td>').join('');
+}
+
+function normalizeParams(p) {
+  if (!p || typeof p !== 'object') return {};
+  // accept both snake_case and legacy PascalCase from older sweeps
+  const out = {...p};
+  const map = {Symbol:'symbol', ShortWindow:'short_window', LongWindow:'long_window', Quantity:'quantity', CustomField:'custom_field'};
+  for (const [from, to] of Object.entries(map)) {
+    if (out[from] != null && out[to] == null) out[to] = out[from];
+  }
+  return out;
+}
+
+async function renderHome() {
+  const [strats, jobs, arts] = await Promise.all([
+    api('/api/strategies'), api('/api/jobs'), api('/api/artifacts')
+  ]);
+  app.innerHTML = `
+    <div class="card"><h2>Strategies</h2>
+      ${strats.length ? '<table><tr><th>Name</th><th>Version</th><th>Path</th><th></th></tr>'+
+        strats.map(s => '<tr><td>'+esc(s.name)+'</td><td>'+esc(s.version)+'</td><td class="muted" style="font-size:.8rem">'+esc(s.abs_path)+'</td><td><a href="#" data-open="'+esc(s.name)+'">Open</a></td></tr>').join('')
+        +'</table>' : '<p class="muted">No strategies. Register with <code>backgommon register ./bin/…</code></p>'}
+    </div>
+    <div class="row">
+      <div class="card"><h2>Recent jobs</h2>
+        ${jobs.length ? '<table><tr><th>ID</th><th>Type</th><th>Strategy</th><th>Status</th><th></th></tr>'+
+          jobs.slice(0,20).map(j => '<tr><td>'+j.id+'</td><td>'+esc(j.type)+'</td><td>'+esc(j.strategy_name)+'</td><td><span class="badge '+esc(j.status)+'">'+esc(j.status)+'</span></td><td>'+
+            (j.status==='running'||j.status==='queued'?'<button class="danger" data-cancel="'+j.id+'">Cancel</button>':'')+
+            (j.report_dir?' <a href="/artifacts/'+(findArt(arts,j.id)||'')+'/" target="_blank">artifacts</a>':'')+
+            (j.error?'<div class="muted" style="font-size:.75rem">'+esc(j.error).slice(0,120)+'</div>':'')+
+          '</td></tr>').join('')+'</table>' : '<p class="muted">No jobs yet.</p>'}
+      </div>
+      <div class="card"><h2>Runs & sweeps</h2>
+        ${arts.length ? '<table><tr><th>ID</th><th>Kind</th><th>Strategy</th><th>Title</th><th></th></tr>'+
+          arts.slice(0,20).map(a => '<tr><td>'+a.id+'</td><td>'+esc(a.kind)+'</td><td>'+esc(a.strategy_name)+'</td><td>'+esc(a.title)+'</td><td>'+
+            '<a href="/artifacts/'+a.id+'/" target="_blank">Open</a>'+
+            (a.kind==='sweep'?' · <a href="#" data-art="'+a.id+'">Trials</a>':'')+
+          '</td></tr>').join('')+'</table>' : '<p class="muted">No artifacts. Ingest with <code>backgommon ingest ./output/…</code></p>'}
+      </div>
+    </div>`;
+  app.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); state.strategy=a.dataset.open; state.view='strategy'; document.querySelector('[data-view=strategy]').classList.add('active'); document.querySelector('[data-view=home]').classList.remove('active'); render(); });
+  app.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => { await api('/api/jobs/'+b.dataset.cancel+'/cancel',{method:'POST'}); render(); });
+  app.querySelectorAll('[data-art]').forEach(a => a.onclick = e => { e.preventDefault(); state.artifact=+a.dataset.art; state.view='sweep'; document.querySelector('[data-view=sweep]').classList.add('active'); document.querySelector('[data-view=home]').classList.remove('active'); render(); });
+}
+function findArt(arts, jobId){ const a=arts.find(x=>x.job_id===jobId); return a?a.id:''; }
+
+async function renderStrategy() {
+  const strats = await api('/api/strategies');
+  if (!state.strategy && strats[0]) state.strategy = strats[0].name;
+  const st = state.strategy ? await api('/api/strategies/'+encodeURIComponent(state.strategy)) : null;
+  let schema = {};
+  try { schema = typeof st.schema === 'string' ? JSON.parse(st.schema) : (st.schema||{}); } catch {}
+  const props = (schema.properties)||{};
+  const fields = Object.keys(props).map(k => {
+    const p = props[k]||{};
+    const def = p.default ?? '';
+    return '<label>'+esc(p.title||k)+'</label><input data-key="'+esc(k)+'" type="'+(p.type==='number'||p.type==='integer'?'number':'text')+'" value="'+esc(def)+'"/>';
+  }).join('');
+  app.innerHTML = `
+    <div class="card">
+      <h2>Strategy</h2>
+      <label>Registered</label>
+      <select id="stratSel">${strats.map(s=>'<option value="'+esc(s.name)+'"'+(s.name===state.strategy?' selected':'')+'>'+esc(s.name)+' @ '+esc(s.version)+'</option>').join('')}</select>
+      ${st? '<p class="muted" style="margin-top:.75rem;font-size:.85rem">'+esc(st.abs_path)+'</p>':''}
+      <div id="form">${fields || '<p class="muted">No schema fields — paste JSON config below.</p>'}</div>
+      <label>Config JSON (merged over form)</label>
+      <textarea id="cfgJson" rows="6">{}</textarea>
+      <div class="row">
+        <button class="primary" id="btnRun">Run once</button>
+        <button class="primary" id="btnSweep" style="background:#6c8cff">Start sweep (cases JSON)</button>
+      </div>
+      <label>Sweep cases JSON array (optional)</label>
+      <textarea id="casesJson" rows="5">[]</textarea>
+      <pre class="err" id="msg"></pre>
+    </div>`;
+  $('#stratSel').onchange = () => { state.strategy = $('#stratSel').value; render(); };
+  $('#btnRun').onclick = async () => {
+    try {
+      const cfg = collectConfig(props);
+      const extra = JSON.parse($('#cfgJson').value||'{}');
+      Object.assign(cfg, extra);
+      const res = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({strategy: state.strategy, config: cfg})});
+      $('#msg').textContent = 'Queued job '+res.job_id;
+      setTimeout(render, 800);
+    } catch(e){ $('#msg').textContent = e.message; }
+  };
+  $('#btnSweep').onclick = async () => {
+    try {
+      const base = collectConfig(props);
+      const extra = JSON.parse($('#cfgJson').value||'{}');
+      Object.assign(base, extra);
+      const cases = JSON.parse($('#casesJson').value||'[]');
+      const body = {strategy: state.strategy, base, cases: cases.length? cases: undefined};
+      const res = await api('/api/sweep', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      $('#msg').textContent = 'Queued sweep job '+res.job_id;
+    } catch(e){ $('#msg').textContent = e.message; }
+  };
+}
+function collectConfig(props){
+  const cfg={};
+  document.querySelectorAll('#form [data-key]').forEach(inp => {
+    const k=inp.dataset.key; const p=props[k]||{};
+    let v=inp.value;
+    if (p.type==='integer') v=parseInt(v,10);
+    else if (p.type==='number') v=parseFloat(v);
+    cfg[k]=v;
+  });
+  return cfg;
+}
+
+async function renderSweep() {
+  const arts = await api('/api/artifacts');
+  const sweeps = arts.filter(a=>a.kind==='sweep');
+  if (!state.artifact && sweeps[0]) state.artifact = sweeps[0].id;
+  const art = state.artifact ? await api('/api/artifacts/'+state.artifact) : null;
+  const trials = (art && art.trials) || [];
+  const metricKeys = ['sharpe_ratio','cagr','returns','max_drawdown','final_capital','total_trades'];
+  const trialRows = trials.map((t, i) => {
+    const params = normalizeParams(t.params);
+    const report = t.report_html || ('viewer.html?trial='+String(t.index).padStart(3,'0'));
+    return '<tr data-idx="'+i+'">'+
+      '<td>'+t.index+'</td>'+
+      '<td class="params">'+paramChips(params)+'</td>'+
+      metricCells(t.metrics, metricKeys)+
+      '<td class="muted">'+esc(t.error||'')+'</td>'+
+      '<td><a href="/artifacts/'+art.id+'/'+report+'" target="_blank">Report</a> · <a href="#" data-idx="'+i+'">Re-run</a></td>'+
+    '</tr>';
+  }).join('');
+
+  app.innerHTML = `
+    <div class="card">
+      <h2>Sweep workspace</h2>
+      <label>Artifact</label>
+      <select id="artSel">${sweeps.map(a=>'<option value="'+a.id+'"'+(a.id===state.artifact?' selected':'')+'>#'+a.id+' '+esc(a.strategy_name)+' — '+esc(a.title)+'</option>').join('')||'<option>None</option>'}</select>
+      ${art? '<p style="margin-top:.75rem"><a href="/artifacts/'+art.id+'/dashboard.html" target="_blank">Open full dashboard</a> · <a href="/artifacts/'+art.id+'/" target="_blank">Browse folder</a></p>':''}
+    </div>
+    ${art ? '<div class="card"><h2>Dashboard</h2><iframe class="dash" src="/artifacts/'+art.id+'/dashboard.html" title="sweep dashboard"></iframe></div>' : ''}
+    <div class="card"><h2>Trials</h2>
+      ${trials.length ? '<div style="overflow:auto"><table class="trials"><tr><th>#</th><th>Params</th>'+
+        metricKeys.map(k=>'<th>'+esc(k)+'</th>').join('')+
+        '<th>Error</th><th></th></tr>'+trialRows+'</table></div>' : '<p class="muted">No trials. Run a sweep or ingest a sweep folder.</p>'}
+      <pre class="err" id="msg"></pre>
+    </div>`;
+  $('#artSel') && ($('#artSel').onchange = () => { state.artifact = +$('#artSel').value; render(); });
+  app.querySelectorAll('a[data-idx]').forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    try {
+      const t = trials[+a.dataset.idx];
+      const params = normalizeParams(t.params);
+      const res = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({strategy: art.strategy_name, config: params})});
+      $('#msg').textContent = 'Queued re-run job '+res.job_id;
+    } catch(err){ $('#msg').textContent = err.message; }
+  });
+}
+
+render();
+setInterval(() => { if (state.view==='home') render().catch(()=>{}); }, 4000);
+</script>
+</body>
+</html>
